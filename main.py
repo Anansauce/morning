@@ -22,7 +22,11 @@ def get_weather():
         res = requests.get(url, timeout=10).json()
     except Exception as e:
         print("Weather API request failed:", e)
-        return "晴", 20
+        # 返回默认值
+        return "晴", 20, 20, 20
+
+    # 打印以便调试（可临时开启）
+    # print("Weather API response:", res)
 
     if isinstance(res, dict) and 'data' in res and isinstance(res['data'], dict) and 'list' in res['data'] and len(res['data']['list']) > 0:
         weather = res['data']['list'][0]
@@ -31,10 +35,35 @@ def get_weather():
             temp = math.floor(float(weather.get('temp', 20)))
         except Exception:
             temp = 20
-        return wea, temp
+
+        # 尝试兼容多种可能的最低/最高温字段名
+        min_temp = None
+        for k in ('low', 'lowTemp', 'tem_low', 'temperatureLow', 'min_temp'):
+            if k in weather and weather.get(k) is not None:
+                try:
+                    min_temp = math.floor(float(weather.get(k)))
+                    break
+                except Exception:
+                    pass
+        max_temp = None
+        for k in ('high', 'highTemp', 'tem_high', 'temperatureHigh', 'max_temp'):
+            if k in weather and weather.get(k) is not None:
+                try:
+                    max_temp = math.floor(float(weather.get(k)))
+                    break
+                except Exception:
+                    pass
+
+        # 兜底为当前温度
+        if min_temp is None:
+            min_temp = temp
+        if max_temp is None:
+            max_temp = temp
+
+        return wea, temp, min_temp, max_temp
 
     print("Unexpected weather API response:", res)
-    return "晴", 20
+    return "晴", 20, 20, 20
 
 def get_count():
     try:
