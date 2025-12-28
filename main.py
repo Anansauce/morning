@@ -7,98 +7,124 @@ import os
 import random
 import re
 
+# Current timestamp for calculations
 today = datetime.now()
+
+# Read environment variables with safe defaults
 _start_date_env = os.environ.get('START_DATE', '').strip()
 start_date = _start_date_env if _start_date_env else None
 city = os.environ.get('CITY', '北京')
 birthday = os.environ.get('BIRTHDAY', '01-01')
 
-app_id = os.environ.get("APP_ID")
-app_secret = os.environ.get("APP_SECRET")
-user_id = os.environ.get("USER_ID")
-template_id = os.environ.get("TEMPLATE_ID")
+app_id = os.environ.get('APP_ID')
+app_secret = os.environ.get('APP_SECRET')
+user_id = os.environ.get('USER_ID')
+template_id = os.environ.get('TEMPLATE_ID')
+
 
 def _parse_temp_value(v):
-    """尝试从各种字符串/数字中提取温度整数，失败返回 None"""
+    """Try to extract an integer temperature from various formats.
+    Returns int or None on failure.
+    """
     if v is None:
         return None
-    if isinstance(v, (int, float)):
-        return int(math.floor(float(v)))
-    s = str(v)
-    # 找到第一个可能的带负号的整数或小数
-    m = re.search(r'-?\d+\.?\d*', s)
-    if not m:
-        return None
     try:
+        if isinstance(v, (int, float)):
+            return int(math.floor(float(v)))
+        s = str(v)
+        m = re.search(r'-?\d+\.?\d*', s)
+        if not m:
+            return None
         return int(math.floor(float(m.group())))
     except Exception:
         return None
 
+
 def get_weather():
     url = f"http://autodev.openspeech.cn/csp/api/v2.1/weather?openId=aiuicus&clientType=android&sign=android&city={city}"
     try:
-        res = requests.get(url, timeout=10).json()
+        r = requests.get(url, timeout=10)
     except Exception as e:
-        print("Weather API request failed:", e)
+        print("Weather HTTP request failed:", e)
         return "晴", 20, 20, 20
 
-    # 临时打印响应以便确认字段（调试用，确认字段后可以移除）
-    print("Weather API response:", res)
+    # Debug prints to inspect response structure in Actions logs. Remove after confirming.
+    print("Weather HTTP status:", r.status_code)
+    print("Weather raw response:", r.text)
 
-    # 标准路径： data.list[0]
-    if isinstance(res, dict) and 'data' in res and isinstance(res['data'], dict) and 'list' in res['data'] and len(res['data']['list']) > 0:
-        weather = res['data']['list'][0]
+    try:
+        res = r.json()
+    except Exception as e:
+        print("Failed to decode weather JSON:", e)
+        return "晴", 20, 20, 20
 
-        # 当前天气描述
-        wea = weather.get('weather') or weather.get('description') or '晴'
+    # If API returns an error code, print and return defaults
+    if isinstance(res, dict) and res.get('code') not in (None, 0):
+        print("Weather API returned error code:", res)
+        return "晴", 20, 20, 20
 
-        # 尝试解析当前温度
-        temp = _parse_temp_value(weather.get('temp') or weather.get('temperature') or weather.get('now') or weather.get('tem')) or 20
+    # Find weather nodes in common positions
+    nodes = []
+    if isinstance(res, dict):
+        if 'data' in res and isinstance(res['data'], dict) and 'list' in res['data']:
+            nodes = res['data']['list']
+        elif 'weather' in res and isinstance(res['weather'], list):
+            nodes = res['weather']
+        elif 'result' in res:
+            rnode = res['result']
+            if isinstance(rnode, list):
+                nodes = rnode
+            else:
+                nodes = [rnode]
 
-        # 兼容多个可能的最低/最高字段名
-        min_keys = ('low', 'lowTemp', 'tem_low', 'temperatureLow', 'min_temp', 'min', 'tem1', 'temp_min')
-        max_keys = ('high', 'highTemp', 'tem_high', 'temperatureHigh', 'max_temp', 'max', 'tem2', 'temp_max')
+    if not nodes:
+        print("No weather nodes found in response:", res)
+        return "晴", 20, 20, 20
 
-        min_temp = None
-        for k in min_keys:
-            if k in weather:
-                min_temp = _parse_temp_value(weather.get(k))
-                if min_temp is not None:
-                    break
+    weather = nodes[0]
 
-        max_temp = None
-        for k in max_keys:
-            if k in weather:
-                max_temp = _parse_temp_value(weather.get(k))
-                if max_temp is not None:
-                    break
+    wea = weather.get('weather') or weather.get('description') or weather.get('text') or '晴'
 
-        # 一些接口可能把最高最低放在 range 字段或以字符串形式提供，例如 "20/28"、"20℃~28℃"
-        if (min_temp is None or max_temp is None):
-            # 尝试在某些常见字符串字段中解析
-            for k in ('temperature', 'temp_range', 'range', 'weatherRange', 'tem'):
-                v = weather.get(k)
-                if isinstance(v, str) and ('/' in v or '~' in v or '到' in v):
-                    parts = re.split(r'[\/~到\-–—]', v)
-                    if len(parts) >= 2:
-                        p0 = _parse_temp_value(parts[0])
-                        p1 = _parse_temp_value(parts[1])
-                        if p0 is not None and p1 is not None:
-                            min_temp = p0 if p0 <= p1 else p1
-                            max_temp = p1 if p1 >= p0 else p0
-                            break
+    temp = _parse_temp_value(weather.get('temp') or weather.get('temperature') or weather.get('now') or weather.get('tem')) or 20
 
-        # 兜底：如果还没有解析到，就用当前温度
-        if min_temp is None:
-            min_temp = temp
-        if max_temp is None:
-            max_temp = temp
+    min_candidates = ('low', 'lowTemp', 'tem_low', 'min_temp', 'min', 'temp_min', 'temperatureLow')
+    max_candidates = ('high', 'highTemp', 'tem_high', 'max_temp', 'max', 'temp_max', 'temperatureHigh')
 
-        return wea, temp, min_temp, max_temp
+    min_temp = None
+    for k in min_candidates:
+        if k in weather:
+            min_temp = _parse_temp_value(weather.get(k))
+            if min_temp is not None:
+                break
 
-    # 非预期响应（如签名无效），打印并返回默认
-    print("Unexpected weather API response:", res)
-    return "晴", 20, 20, 20
+    max_temp = None
+    for k in max_candidates:
+        if k in weather:
+            max_temp = _parse_temp_value(weather.get(k))
+            if max_temp is not None:
+                break
+
+    # Try parse ranges like "20/28" or "20~28"
+    if (min_temp is None or max_temp is None):
+        for k in ('temperature', 'temp_range', 'range', 'weatherRange', 'tem'):
+            v = weather.get(k)
+            if isinstance(v, str) and any(sep in v for sep in ('/', '~', '到', '—', '-')):
+                parts = re.split(r'[\/~到\-–—]', v)
+                if len(parts) >= 2:
+                    p0 = _parse_temp_value(parts[0])
+                    p1 = _parse_temp_value(parts[1])
+                    if p0 is not None and p1 is not None:
+                        min_temp = min(p0, p1)
+                        max_temp = max(p0, p1)
+                        break
+
+    if min_temp is None:
+        min_temp = temp
+    if max_temp is None:
+        max_temp = temp
+
+    return wea, temp, min_temp, max_temp
+
 
 def get_count():
     if not start_date:
@@ -111,6 +137,7 @@ def get_count():
         print("Error parsing START_DATE:", e)
         return 0
 
+
 def get_birthday():
     try:
         next_birthday = datetime.strptime(str(date.today().year) + "-" + birthday, "%Y-%m-%d")
@@ -120,6 +147,7 @@ def get_birthday():
     except Exception as e:
         print("Error parsing BIRTHDAY:", e)
         return 0
+
 
 def get_words():
     try:
@@ -131,8 +159,10 @@ def get_words():
         print("get_words failed:", e)
         return ""
 
+
 def get_random_color():
     return "#%06x" % random.randint(0, 0xFFFFFF)
+
 
 client = WeChatClient(app_id, app_secret)
 wm = WeChatMessage(client)
